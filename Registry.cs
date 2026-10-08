@@ -24,8 +24,8 @@ public static class Registry
     public static bool Compatible(JsonElement package, UnityVersion editor)
     {
         if (!package.TryGetProperty("unity", out var unity) || string.IsNullOrEmpty(unity.GetString())) return true;
-        var release = package.TryGetProperty("unityRelease", out var r) && !string.IsNullOrEmpty(r.GetString()) ? r.GetString() : "0a0";
-        return UnityVersion.Parse(unity.GetString() + "." + release).CompareTo(editor) <= 0;
+        var release = package.TryGetProperty("unityRelease", out var r) && !string.IsNullOrEmpty(r.GetString()) ? r.GetString()! : "0a0";
+        return UnityVersion.Parse(release.Count(c => c == '.') == 2 ? release : unity.GetString() + "." + release).CompareTo(editor) <= 0;
     }
     public static int CompareVersions(string left, string right)
     {
@@ -61,13 +61,12 @@ public static class Registry
                 {
                     selections.Add(new(artifact.Origin.Version, name, builtIn.Version, "bundled", "editor"));
                     foreach (var dep in builtIn.Dependencies)
-                        await Include(dep.Key, dep.Value, "dependency", required: true);
-                    continue;
+                        await Include(dep.Key, dep.Value, "dependency");
                 }
                 var metadata = await Get(name);
                 if (metadata is null || !metadata.Value.TryGetProperty("versions", out var versions))
                 {
-                    unavailable.Add($"{artifact.Origin.Version}: {name}: no public registry metadata");
+                    if (builtIn is null) unavailable.Add($"{artifact.Origin.Version}: {name}: no public registry metadata");
                     continue;
                 }
                 var candidates = versions.EnumerateObject().Where(v => Compatible(v.Value, editor))
@@ -75,34 +74,36 @@ public static class Registry
                 foreach (var preview in new[] { false, true })
                 {
                     foreach (var candidate in candidates.Where(v => v.Name.Contains('-') == preview).Take(1))
-                        await Include(name, candidate.Name, preview ? "preview" : "stable", required: true);
+                        await Include(name, candidate.Name, preview ? "preview" : "stable");
                 }
             }
-            async Task Include(string name, string version, string channel, bool required)
+            async Task Include(string name, string version, string channel)
             {
+                if (version == "default" && bundled.TryGetValue(name, out var recommended)) version = recommended.Version;
+                if (version == "default" && artifact.Recommended?.TryGetValue(name, out var catalogVersion) == true) version = catalogVersion;
                 if (selections.Any(s => s.Editor == artifact.Origin.Version && s.Name == name && s.Version == version)) return;
                 if (bundled.TryGetValue(name, out var local) && local.Version == version)
                 {
                     selections.Add(new(artifact.Origin.Version, name, version, channel, "editor"));
-                    foreach (var dep in local.Dependencies) await Include(dep.Key, dep.Value, "dependency", true);
+                    foreach (var dep in local.Dependencies) await Include(dep.Key, dep.Value, "dependency");
                     return;
                 }
                 var metadata = await Get(name);
                 if (metadata is null || !metadata.Value.TryGetProperty("versions", out var versions) || !versions.TryGetProperty(version, out var node))
                 {
                     var error = $"{artifact.Origin.Version}: {name}@{version}: exact dependency unavailable";
-                    if (required) throw new InvalidDataException(error);
                     unavailable.Add(error);
+                    selections.Add(new(artifact.Origin.Version, name, version, channel, "unavailable"));
                     return;
                 }
-                if (!Compatible(node, editor)) throw new InvalidDataException($"{name}@{version} is incompatible with {artifact.Origin.Version}");
+                if (!Compatible(node, editor)) unavailable.Add($"{artifact.Origin.Version}: {name}@{version}: dependency requires a newer editor; retained for analysis");
                 var dist = node.GetProperty("dist");
                 var integrity = dist.TryGetProperty("integrity", out var i) ? i.GetString() : dist.TryGetProperty("shasum", out var sha) ? "sha1-" + Convert.ToBase64String(Convert.FromHexString(sha.GetString()!)) : null;
                 var key = name + "@" + version;
                 var targets = requests.TryGetValue(key, out var existing) ? existing.Editors.Append(artifact.Origin.Version).Distinct().Order().ToArray() : [artifact.Origin.Version];
                 requests[key] = new(name, version, dist.GetProperty("tarball").GetString()!, integrity, targets);
                 selections.Add(new(artifact.Origin.Version, name, version, channel, "registry"));
-                foreach (var dep in Dependencies(node)) await Include(dep.Key, dep.Value, "dependency", true);
+                foreach (var dep in Dependencies(node)) await Include(dep.Key, dep.Value, "dependency");
             }
         }
         return new(requests.Values.ToArray(), selections.Distinct().OrderBy(s => s.Editor, StringComparer.Ordinal).ThenBy(s => s.Name, StringComparer.Ordinal).ThenBy(s => s.Version, StringComparer.Ordinal).ToArray(), unavailable.ToArray());

@@ -10,6 +10,7 @@ public sealed class Bundle(string directory, Origin origin)
     readonly SortedDictionary<string, PackageInfo> packages = new(StringComparer.Ordinal);
     readonly Dictionary<(string Hash, string Stem), Entry?> assemblies = new();
     public SortedSet<string> PackageNames { get; } = new(StringComparer.Ordinal);
+    public SortedDictionary<string, string> Recommended { get; } = new(StringComparer.Ordinal);
     static readonly FrozenSet<string> Extensions = new[]
     {
         ".cs", ".asmdef", ".asmref", ".rsp", ".dll",
@@ -95,7 +96,7 @@ public sealed class Bundle(string directory, Origin origin)
         timer.Restart();
         await Verify(destination);
         var verificationSeconds = timer.Elapsed.TotalSeconds;
-        var artifact = new Artifact(name, await Data.HashFile(destination), new FileInfo(destination).Length, origin, Data.Format, Data.Analysis, manifest.Packages, PackageNames.ToArray());
+        var artifact = new Artifact(name, await Data.HashFile(destination), new FileInfo(destination).Length, origin, Data.Format, Data.Analysis, manifest.Packages, PackageNames.ToArray(), Recommended);
         Data.Write(Path.Combine(output, name + ".json"), artifact);
         Data.Write(Path.Combine(output, name + ".metrics.json"), new { rawBytes, compressedBytes = artifact.Size, compressionSeconds, verificationSeconds, objects = manifest.Entries.Select(e => e.Hash).Distinct().Count(), entries = manifest.Entries.Length });
         Console.WriteLine($"Bundle {name}: {manifest.Entries.Length} entries, {artifact.Size:N0} compressed bytes");

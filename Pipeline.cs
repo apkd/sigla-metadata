@@ -109,6 +109,9 @@ public static class Pipeline
                 var bytes = await Archives.Bytes(stream, size);
                 using var manifest = JsonDocument.Parse(bytes);
                 FindPackages(manifest.RootElement, bundle.PackageNames);
+                if (manifest.RootElement.TryGetProperty("packages", out var catalogPackages))
+                    foreach (var package in catalogPackages.EnumerateObject())
+                        if (package.Value.TryGetProperty("version", out var version)) bundle.Recommended[package.Name] = version.GetString()!;
                 await bundle.Add("configuration/package-catalog.json", bytes);
             }
             else if (relative == "Resources/modules.asset") await bundle.Add("configuration/modules.asset", await Archives.Bytes(stream, size));

@@ -37,7 +37,7 @@ public sealed record Origin(string Kind, string Name, string Version, string Rev
 public sealed record Entry(string Path, string Kind, string Hash, long Size, string? Group = null, string? Name = null);
 public sealed record PackageInfo(string Name, string Version, string Source, string Editor, SortedDictionary<string, string> Dependencies);
 public sealed record BundleManifest(int Format, int Analysis, Origin Origin, string Producer, Entry[] Entries, PackageInfo[] Packages);
-public sealed record Artifact(string Name, string Sha256, long Size, Origin Origin, int Format, int Analysis, PackageInfo[] Packages, string[] PackageNames);
+public sealed record Artifact(string Name, string Sha256, long Size, Origin Origin, int Format, int Analysis, PackageInfo[] Packages, string[] PackageNames, SortedDictionary<string, string>? Recommended = null);
 public sealed record Catalog(int Format, Artifact[] Artifacts);
 public sealed record EditorRelease(string Version, string Revision, string Url, string? Integrity);
 public sealed record PackageRequest(string Name, string Version, string Url, string? Integrity, string[] Editors);

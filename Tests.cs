@@ -32,6 +32,8 @@ public static class Tests
         using var package = JsonDocument.Parse("{\"unity\":\"2022.3\",\"unityRelease\":\"2f1\"}");
         Check(!Registry.Compatible(package.RootElement, UnityVersion.Parse("2022.3.1f1")), "Minimum Unity patch is respected");
         Check(Registry.Compatible(package.RootElement, UnityVersion.Parse("6000.0.0b1")), "Newer editor satisfies declared minimum");
+        using var fullRelease = JsonDocument.Parse("{\"unity\":\"2022.3\",\"unityRelease\":\"2022.3.2f1\"}");
+        Check(!Registry.Compatible(fullRelease.RootElement, UnityVersion.Parse("2022.3.1f1")), "Full release fields preserve the minimum patch");
         try { Archives.PathName("../outside"); throw new InvalidOperationException("Escaping path accepted"); } catch (InvalidDataException) { }
         var root = Path.Combine(Path.GetTempPath(), "sigla-metadata-test-" + Guid.NewGuid());
         try
