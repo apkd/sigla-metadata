@@ -1,0 +1,6 @@
+.notes/
+bin/
+obj/
+out/
+work/
+*.user

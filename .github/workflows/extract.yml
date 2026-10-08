@@ -1,0 +1,185 @@
+name: Extract Unity metadata
+
+on:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild bundles already present in the catalog
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unity-metadata-archive
+  cancel-in-progress: false
+
+env:
+  DOTNET_NOLOGO: '1'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  SOURCE_REVISION: ${{ github.sha }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      has_work: ${{ steps.plan.outputs.has_work }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build standalone extractor
+        run: dotnet publish -c Release -r linux-x64 --self-contained true -o out/tool
+      - name: Test metadata and bundle contracts
+        run: out/tool/sigla-metadata self-test
+      - name: Plan missing editor bundles
+        id: plan
+        env:
+          FORCE: ${{ inputs.force || 'false' }}
+        run: out/tool/sigla-metadata plan --output out/plan --force "$FORCE"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: extractor
+          path: out/tool/
+          compression-level: 1
+          retention-days: 3
+      - uses: actions/upload-artifact@v6
+        with:
+          name: editor-plan
+          path: out/plan/
+          retention-days: 7
+
+  editors:
+    needs: plan
+    if: needs.plan.outputs.has_work == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    name: Editor ${{ matrix.version }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: extractor
+          path: tool
+      - name: Make extractor executable
+        run: chmod +x tool/sigla-metadata
+      - name: Download, extract and verify editor bundle
+        env:
+          RELEASE: ${{ toJSON(matrix) }}
+        run: tool/sigla-metadata editor --release "$RELEASE" --work work --output bundles
+      - uses: actions/upload-artifact@v6
+        with:
+          name: inventory-${{ matrix.version }}
+          path: bundles/*.json
+          retention-days: 3
+      - uses: actions/upload-artifact@v6
+        with:
+          name: editor-${{ matrix.version }}
+          path: bundles/
+          compression-level: 0
+          retention-days: 3
+
+  package-plan:
+    needs: [plan, editors]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.editors.result == 'success' || needs.editors.result == 'skipped') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      has_work: ${{ steps.plan.outputs.has_work }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: extractor
+          path: tool
+      - run: chmod +x tool/sigla-metadata
+      - uses: actions/download-artifact@v8
+        with:
+          name: editor-plan
+          path: incoming/editor-plan
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: inventory-*
+          path: incoming
+      - name: Resolve stable and preview packages and exact dependencies
+        id: plan
+        env:
+          FORCE: ${{ inputs.force || 'false' }}
+        run: tool/sigla-metadata plan --phase packages --base incoming/editor-plan/plan.json --input incoming --output package-plan --force "$FORCE"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: package-plan
+          path: package-plan/
+          retention-days: 7
+
+  packages:
+    needs: package-plan
+    if: ${{ !cancelled() && needs.package-plan.result == 'success' && needs.package-plan.outputs.has_work == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.package-plan.outputs.matrix) }}
+    name: Packages ${{ matrix.shard }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: extractor
+          path: tool
+      - run: chmod +x tool/sigla-metadata
+      - uses: actions/download-artifact@v8
+        with:
+          name: package-plan
+          path: plan
+      - name: Build and verify package bundles
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ matrix.shards }}
+        run: tool/sigla-metadata packages --plan plan/requests.json --shard "$SHARD" --shards "$SHARDS" --work work --output bundles
+      - uses: actions/upload-artifact@v6
+        with:
+          name: packages-${{ matrix.shard }}
+          path: bundles/
+          compression-level: 0
+          retention-days: 3
+
+  publish:
+    needs: [plan, editors, package-plan, packages]
+    if: ${{ !cancelled() && needs.package-plan.result == 'success' && (needs.packages.result == 'success' || needs.packages.result == 'skipped') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: extractor
+          path: tool
+      - run: chmod +x tool/sigla-metadata
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: '*-plan'
+          path: plans
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: editor-*
+          path: incoming
+      - uses: actions/download-artifact@v8
+        if: needs.packages.result == 'success'
+        with:
+          pattern: packages-*
+          path: incoming
+      - name: Publish verified assets, then update the catalog
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: tool/sigla-metadata publish --repo "$GITHUB_REPOSITORY" --input incoming --base plans/editor-plan/plan.json --selection plans/package-plan/selection.json
