@@ -36,7 +36,8 @@ jobs:
           name: producer
           path: sigla
           compression-level: 0
-          retention-days: 1
+          retention-days: 7
+          overwrite: true
       - name: Plan editors
         id: plan
         env:
@@ -44,12 +45,19 @@ jobs:
         run: |
           args=()
           if [ "$FORCE" = true ]; then args+=(--force); fi
-          ./sigla metadata plan --output plan/editors.bin --repo "$GITHUB_REPOSITORY" "${args[@]}"
+          for attempt in 1 2 3; do
+            ./sigla metadata plan --output plan/editors.bin --repo "$GITHUB_REPOSITORY" "${args[@]}" && break
+            status=$?
+            if [ "$attempt" -eq 3 ]; then exit "$status"; fi
+            echo "::warning::Editor planning failed; retrying (attempt $attempt/3)."
+            sleep "$((attempt * 15))"
+          done
       - uses: actions/upload-artifact@v6
         with:
           name: editor-plan
           path: plan/
-          retention-days: 1
+          retention-days: 7
+          overwrite: true
 
   editors:
     needs: plan
@@ -73,18 +81,27 @@ jobs:
       - name: Build editor bundle
         env:
           INDEX: ${{ matrix.index }}
-        run: tool/sigla metadata editor --plan plan/editors.bin --index "$INDEX" --output bundles
+        run: |
+          for attempt in 1 2 3; do
+            tool/sigla metadata editor --plan plan/editors.bin --index "$INDEX" --output bundles && break
+            status=$?
+            if [ "$attempt" -eq 3 ]; then exit "$status"; fi
+            echo "::warning::Editor build failed; retrying (attempt $attempt/3)."
+            sleep "$((attempt * 15))"
+          done
       - uses: actions/upload-artifact@v6
         with:
           name: inventory-${{ matrix.index }}
           path: bundles/*.bin
-          retention-days: 1
+          retention-days: 7
+          overwrite: true
       - uses: actions/upload-artifact@v6
         with:
           name: editor-${{ matrix.index }}
           path: bundles/
           compression-level: 0
-          retention-days: 1
+          retention-days: 7
+          overwrite: true
 
   package-plan:
     needs: [plan, editors]
@@ -112,12 +129,20 @@ jobs:
       - run: mkdir -p incoming
       - name: Plan packages
         id: plan
-        run: tool/sigla metadata plan-packages --base plan/editors.bin --input incoming --output plan/packages.bin
+        run: |
+          for attempt in 1 2 3; do
+            tool/sigla metadata plan-packages --base plan/editors.bin --input incoming --output plan/packages.bin && break
+            status=$?
+            if [ "$attempt" -eq 3 ]; then exit "$status"; fi
+            echo "::warning::Package planning failed; retrying (attempt $attempt/3)."
+            sleep "$((attempt * 15))"
+          done
       - uses: actions/upload-artifact@v6
         with:
           name: package-plan
           path: plan/packages.bin
-          retention-days: 1
+          retention-days: 7
+          overwrite: true
 
   packages:
     needs: package-plan
@@ -141,13 +166,21 @@ jobs:
         env:
           SHARD: ${{ matrix.shard }}
           SHARDS: ${{ matrix.shards }}
-        run: tool/sigla metadata packages --plan plan/packages.bin --shard "$SHARD" --shards "$SHARDS" --output bundles
+        run: |
+          for attempt in 1 2 3; do
+            tool/sigla metadata packages --plan plan/packages.bin --shard "$SHARD" --shards "$SHARDS" --output bundles && break
+            status=$?
+            if [ "$attempt" -eq 3 ]; then exit "$status"; fi
+            echo "::warning::Package build failed; retrying (attempt $attempt/3)."
+            sleep "$((attempt * 15))"
+          done
       - uses: actions/upload-artifact@v6
         with:
           name: packages-${{ matrix.shard }}
           path: bundles/
           compression-level: 0
-          retention-days: 1
+          retention-days: 7
+          overwrite: true
 
   publish:
     needs: [plan, editors, package-plan, packages]
@@ -184,21 +217,17 @@ jobs:
 
   cleanup:
     needs: [plan, editors, package-plan, packages, publish]
-    if: always()
+    if: ${{ !cancelled() && needs.publish.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       actions: write
     steps:
-      - name: Delete workflow handoffs, including leftovers from completed runs
+      - name: Delete handoffs after successful publication
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/workflows/extract.yml/runs?status=completed&per_page=100" --jq '.workflow_runs[].id' > run-ids
-          echo "$GITHUB_RUN_ID" >> run-ids
-          while read -r run_id; do
-            gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" --jq '.artifacts[].id' > artifact-ids
-            while read -r artifact_id; do
-              gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id"
-            done < artifact-ids
-          done < run-ids
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" --jq '.artifacts[].id' > artifact-ids
+          while read -r artifact_id; do
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id"
+          done < artifact-ids
