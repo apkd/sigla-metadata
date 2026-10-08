@@ -123,6 +123,9 @@ public static class Archives
                 if (entry.EntryType is TarEntryType.RegularFile or TarEntryType.V7RegularFile && entry.DataStream is { } stream)
                     await visit(name, stream, entry.Length);
             }
+            // Consume tar padding through the compression footer. Otherwise a
+            // decoder can block on a full stdout pipe after TarReader reaches EOF.
+            await process.StandardOutput.BaseStream.CopyToAsync(Stream.Null);
             await process.WaitForExitAsync();
             if (process.ExitCode != 0) throw new InvalidDataException($"Archive decompression failed: {await errors}");
         }

@@ -123,10 +123,12 @@ public static class Pipeline
             File.Delete(package);
         }
         var manifestResult = bundle.Manifest;
+        Console.WriteLine($"Extracted {manifestResult.Entries.Length} entries and {manifestResult.Packages.Length} bundled packages in {started.Elapsed.TotalSeconds:F1}s");
         if (!manifestResult.Entries.Any(e => e.Group == "editor" && e.Name == "UnityEngine.CoreModule")
             || !manifestResult.Entries.Any(e => e.Path == "configuration/modules.asset")
             || !manifestResult.Entries.Any(e => e.Group == "standard")
-            || !manifestResult.Entries.Any(e => e.Group == "framework"))
+            || !manifestResult.Entries.Any(e => e.Group == "framework")
+            || manifestResult.Packages.Length == 0 || bundle.PackageNames.Count == 0)
             throw new InvalidDataException("Editor reference groups are incomplete; this layout needs support.");
         await bundle.Save(options.Required("output"));
         Console.WriteLine($"Editor completed in {started.Elapsed.TotalSeconds:F1}s");

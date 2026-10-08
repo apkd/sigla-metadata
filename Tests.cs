@@ -36,18 +36,42 @@ public static class Tests
         var root = Path.Combine(Path.GetTempPath(), "sigla-metadata-test-" + Guid.NewGuid());
         try
         {
+            var padded = Path.Combine(root, "padded.tgz");
+            Directory.CreateDirectory(root);
+            using (var file = File.Create(padded))
+            using (var gzip = new System.IO.Compression.GZipStream(file, System.IO.Compression.CompressionLevel.Fastest))
+            {
+                using (var writer = new System.Formats.Tar.TarWriter(gzip, leaveOpen: true))
+                    writer.WriteEntry(new System.Formats.Tar.PaxTarEntry(System.Formats.Tar.TarEntryType.RegularFile, "Code.cs") { DataStream = new MemoryStream("class C {}"u8.ToArray()) });
+                gzip.Write(new byte[1024 * 1024]);
+            }
+            var paths = new List<string>();
+            await Archives.Read(padded, (path, _, _) => { paths.Add(path); return Task.CompletedTask; }).WaitAsync(TimeSpan.FromSeconds(10));
+            Check(paths.Count == 1, "Padded compressed archives finish without waiting on a blocked decoder");
             var bundle = new Bundle(Path.Combine(root, "objects"), new("editor", "fixture", "1.0.0", "revision", "https://example.invalid/archive"));
             await bundle.Add("references/first.dll", bytes, "editor");
             await bundle.Add("references/second.dll", bytes, "framework");
             var source = Encoding.UTF8.GetBytes("// preserved\r\npublic class Example {}\r\n");
             await bundle.Add("packages/example/Code.cs", source, "package");
             await bundle.Add("packages/example/Alias.cs", source, "package");
+            try
+            {
+                await bundle.Add("packages/example/Code.cs", Encoding.UTF8.GetBytes("different contents"));
+                throw new InvalidOperationException("Conflicting logical path accepted");
+            }
+            catch (InvalidDataException) { }
             Check(bundle.Manifest.Entries[0].Hash == bundle.Manifest.Entries[1].Hash, "Duplicate source contents share an object");
             var first = await bundle.Save(Path.Combine(root, "one"));
             var second = await bundle.Save(Path.Combine(root, "two"));
             Check(first.Sha256 == second.Sha256, "Bundle generation is reproducible");
             Check(bundle.Manifest.Entries.Where(e => e.Kind == "assembly").All(e => e.Hash != Data.Hash(bytes)), "Assembly objects contain analysis, not DLLs");
             await Bundle.Verify(Path.Combine(root, "one", first.Name));
+            var corrupted = File.ReadAllBytes(Path.Combine(root, "one", first.Name));
+            corrupted[^1] ^= 1;
+            var bad = Path.Combine(root, "corrupt.tar.zst");
+            File.WriteAllBytes(bad, corrupted);
+            try { await Bundle.Verify(bad); throw new InvalidOperationException("Corrupt archive accepted"); }
+            catch (InvalidDataException) { }
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
         Console.WriteLine("All metadata, version selection, and bundle tests passed.");
