@@ -1,0 +1,204 @@
+name: Extract Unity metadata
+
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild the current selection
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unity-metadata-archive
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      has_work: ${{ steps.plan.outputs.has_work }}
+    steps:
+      - name: Download latest Sigla
+        run: curl -fL --retry 3 https://github.com/apkd/Sigla/releases/latest/download/sigla-linux-x64 -o sigla
+      - run: chmod +x sigla
+      - run: ./sigla --version
+      - uses: actions/upload-artifact@v6
+        with:
+          name: producer
+          path: sigla
+          compression-level: 0
+          retention-days: 1
+      - name: Plan editors
+        id: plan
+        env:
+          FORCE: ${{ inputs.force || 'false' }}
+        run: |
+          args=()
+          if [ "$FORCE" = true ]; then args+=(--force); fi
+          ./sigla metadata plan --output plan/editors.bin --repo "$GITHUB_REPOSITORY" "${args[@]}"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: editor-plan
+          path: plan/
+          retention-days: 1
+
+  editors:
+    needs: plan
+    if: needs.plan.outputs.has_work == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    name: Editor ${{ matrix.version }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: producer
+          path: tool
+      - run: chmod +x tool/sigla
+      - uses: actions/download-artifact@v8
+        with:
+          name: editor-plan
+          path: plan
+      - name: Build editor bundle
+        env:
+          INDEX: ${{ matrix.index }}
+        run: tool/sigla metadata editor --plan plan/editors.bin --index "$INDEX" --output bundles
+      - uses: actions/upload-artifact@v6
+        with:
+          name: inventory-${{ matrix.index }}
+          path: bundles/*.bin
+          retention-days: 1
+      - uses: actions/upload-artifact@v6
+        with:
+          name: editor-${{ matrix.index }}
+          path: bundles/
+          compression-level: 0
+          retention-days: 1
+
+  package-plan:
+    needs: [plan, editors]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.editors.result == 'success' || needs.editors.result == 'skipped') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      has_work: ${{ steps.plan.outputs.has_work }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: producer
+          path: tool
+      - run: chmod +x tool/sigla
+      - uses: actions/download-artifact@v8
+        with:
+          name: editor-plan
+          path: plan
+      - uses: actions/download-artifact@v8
+        if: needs.editors.result != 'skipped'
+        with:
+          pattern: inventory-*
+          path: incoming
+      - run: mkdir -p incoming
+      - name: Plan packages
+        id: plan
+        run: tool/sigla metadata plan-packages --base plan/editors.bin --input incoming --output plan/packages.bin
+      - uses: actions/upload-artifact@v6
+        with:
+          name: package-plan
+          path: plan/packages.bin
+          retention-days: 1
+
+  packages:
+    needs: package-plan
+    if: ${{ !cancelled() && needs.package-plan.result == 'success' && needs.package-plan.outputs.has_work == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.package-plan.outputs.matrix) }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: producer
+          path: tool
+      - run: chmod +x tool/sigla
+      - uses: actions/download-artifact@v8
+        with:
+          name: package-plan
+          path: plan
+      - name: Build packages
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ matrix.shards }}
+        run: tool/sigla metadata packages --plan plan/packages.bin --shard "$SHARD" --shards "$SHARDS" --output bundles
+      - uses: actions/upload-artifact@v6
+        with:
+          name: packages-${{ matrix.shard }}
+          path: bundles/
+          compression-level: 0
+          retention-days: 1
+
+  publish:
+    needs: [plan, editors, package-plan, packages]
+    if: ${{ !cancelled() && needs.package-plan.result == 'success' && (needs.packages.result == 'success' || needs.packages.result == 'skipped') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: producer
+          path: tool
+      - run: chmod +x tool/sigla
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: '*-plan'
+          path: plans
+      - uses: actions/download-artifact@v8
+        if: needs.editors.result != 'skipped'
+        with:
+          pattern: editor-*
+          path: incoming
+      - uses: actions/download-artifact@v8
+        if: needs.packages.result != 'skipped'
+        with:
+          pattern: packages-*
+          path: incoming
+      - run: mkdir -p incoming
+      - name: Publish and remove obsolete release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: tool/sigla metadata publish --repo "$GITHUB_REPOSITORY" --base plans/editor-plan/editors.bin --packages plans/package-plan/packages.bin --input incoming
+
+  cleanup:
+    needs: [plan, editors, package-plan, packages, publish]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: write
+    steps:
+      - name: Delete workflow handoffs, including leftovers from completed runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/workflows/extract.yml/runs?status=completed&per_page=100" --jq '.workflow_runs[].id' > run-ids
+          echo "$GITHUB_RUN_ID" >> run-ids
+          while read -r run_id; do
+            gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" --jq '.artifacts[].id' > artifact-ids
+            while read -r artifact_id; do
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id"
+            done < artifact-ids
+          done < run-ids
